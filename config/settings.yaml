@@ -1,0 +1,28 @@
+# NHTSA Crawler & Analyzer Global Settings
+
+project:
+  name: "NHTSA_Frontal_Crash_Analysis"
+  version: "1.0.0"
+
+collection:
+  target_years: [2010, 2025]
+  crash_type: "Frontal"        # 분석 대상 충돌 유형
+  max_concurrent_tasks: 5      # API 동시 요청 수 (Semaphore 제어용)
+  timeout_seconds: 30
+
+paths:
+
+  log_dir: "./logs"
+
+analysis:
+  cfc_filter_class: 60         # SAE J211 가속도 필터 클래스
+  unit_system: "SI"            # 최종 출력 단위 (SI or Imperial)
+  mapping_strictness: 0.8      # 모델명 매핑 시 유사도 기준
+
+api:
+  base_url: "https://api.nhtsa.gov/v1/nrd"
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+storage:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"

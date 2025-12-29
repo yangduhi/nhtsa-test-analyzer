@@ -1,0 +1,202 @@
+[
+    {
+        "ModelYear": 2023,
+        "Make": "ACURA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "ALFA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "AUDI",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "BENTLEY",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "BMW",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "BRIGHTDROP",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "BUICK",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "CADILLAC",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "CHEVROLET",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "CHRYSLER",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "DODGE",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "FIAT",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "FORD",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "GENESIS",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "GMC",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "HONDA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "HYUNDAI",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "INFINITI",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "JAGUAR",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "JEEP",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "KIA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "LAND ROVER",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "LEXUS",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "LINCOLN",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "LUCID",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "MAZDA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "MERCEDES-BENZ",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "MINI",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "MITSUBISHI",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "NISSAN",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "POLESTAR",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "PORSCHE",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "RAM",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "RIVIAN",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "ROLLS-ROYCE",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "SUBARU",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "TESLA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "TOYOTA",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "VOLKSWAGEN",
+        "VehicleId": 0
+    },
+    {
+        "ModelYear": 2023,
+        "Make": "VOLVO",
+        "VehicleId": 0
+    }
+]

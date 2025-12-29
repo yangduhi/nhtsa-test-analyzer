@@ -1,0 +1,21 @@
+# --- 핵심 네트워크 및 비동기 처리 ---
+httpx>=0.25.0
+tenacity>=8.2.0
+asyncio>=3.4.3
+
+# --- 데이터 모델링 및 설정 관리 ---
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+PyYAML>=6.0.1
+
+# --- 공학 데이터 분석 (가속도/제원) ---
+pandas>=2.1.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# --- 로깅 및 디버깅 ---
+loguru>=0.7.2
+
+# --- PDF 리포트 크롤링 및 파싱 (필요 시 설치) ---
+playwright>=1.40.0
+# marker-pdf  # PDF 내 표(Table) 추출 성능 향상을 위해 검토 가능

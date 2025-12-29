@@ -1,0 +1,11 @@
+# Python 관련 제외
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# 설정 및 보안 관련 제외
+.env
+.vscode/
