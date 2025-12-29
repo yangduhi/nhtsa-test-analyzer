@@ -1,11 +1,20 @@
-# Python 관련 제외
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-ENV/
+# .gitignore
 
-# 설정 및 보안 관련 제외
-.env
+# 가상환경 제외
+venv/
+env/
+
+# 수집된 데이터 폴더 제외 (용량이 크므로 Git에 올리지 않음)
+nhtsa_data/
+data/
+
+# 파이썬 캐시 제외
+__pycache__/
+*.pyc
+
+# 로그 파일 제외
+logs/
+*.log
+
+# VS Code 설정 제외
 .vscode/
