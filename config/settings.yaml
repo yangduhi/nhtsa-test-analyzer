@@ -6,7 +6,6 @@ project:
 
 collection:
   target_years: [2010, 2025]
-  crash_type: "Frontal"        # 분석 대상 충돌 유형
   max_concurrent_tasks: 2      # 403 방지를 위해 동시 요청 수를 5 -> 2로 낮춤
   timeout_seconds: 60          # 타임아웃 시간 연장
 
