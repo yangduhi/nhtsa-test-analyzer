@@ -29,3 +29,7 @@ PyMuPDF>=1.22.5
 
 aiohttpx>=0.24.0
 tqdm>=4.65.0
+
+matplotlib
+nptdms
+seaborn

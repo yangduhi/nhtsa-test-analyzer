@@ -1,220 +1,178 @@
 """
-NHTSA Data File Downloader (운영 최적화 버전).
-
-주요 기능:
-1. 재시도 로직 (Tenacity): 네트워크 불안정 시 최대 3회 재시도 및 지수 백오프 적용.
-2. 에러 로깅 (Loguru): 다운로드 실패 항목을 'download_errors.log'에 기록.
-3. 무결성 검증: 다운로드 후 파일 크기가 0이거나 파일이 없으면 실패로 간주하고 삭제.
-4. 증분 다운로드: 이미 파일이 존재하고 크기가 0보다 크면 다운로드를 건너뜀.
+Downloader module for NHTSA test analyzer.
+Updated: Adds auto-unzip functionality for TDMS files.
 """
 
-import argparse
 import asyncio
-import glob
-import json
 import os
 import sys
-from typing import Any, Coroutine, Dict, List
-
+import warnings
+import sqlite3
 import aiofiles
-import aiohttp
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
+import httpx
+import zipfile  # [추가] 압축 해제를 위한 모듈
+from typing import List, Tuple
 from loguru import logger
 from tqdm.asyncio import tqdm
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-import config
-
-# --- 설정 및 경로 ---
-BASE_DOWNLOAD_DIR: str = "data/raw"
-SIGNAL_DIR_NAME: str = "signals"
-REPORT_DIR_NAME: str = "reports"
-ERROR_LOG_FILE: str = "download_errors.log"
-
-# --- 로거 설정 ---
-# 에러 레벨 이상의 로그만 파일에 기록 (10MB 단위로 로테이션)
-logger.add(ERROR_LOG_FILE, rotation="10 MB", level="ERROR", encoding="utf-8")
+from config import settings
+from src.utils.storage import DatabaseHandler
 
 
-@retry(
-    stop=stop_after_attempt(3),  # 최대 3회 재시도
-    wait=wait_exponential(multiplier=1, min=2, max=10),  # 2초에서 10초 사이 지수 백오프
-    retry=retry_if_exception_type(
-        (aiohttp.ClientError, asyncio.TimeoutError, ValueError, IOError)
-    ),
-    reraise=True,
-)
-async def _download_core(
-    session: aiohttp.ClientSession, url: str, save_path: str
-) -> None:
-    """실제 다운로드 및 무결성 검증을 수행하는 핵심 함수."""
-    timeout = aiohttp.ClientTimeout(total=300)  # 파일당 최대 5분 제한
+class FileDownloader:
+    def __init__(self):
+        self.db = DatabaseHandler()
+        self.base_dir = os.path.join(settings.DATA_ROOT, "downloads")
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.sem = asyncio.Semaphore(4)
+        self.headers = settings.API_HEADERS
 
-    async with session.get(url, timeout=timeout) as response:
-        if response.status != 200:
-            raise aiohttp.ClientError(f"HTTP Status {response.status}")
+    async def _download_file(
+        self, client: httpx.AsyncClient, url: str, dest_path: str
+    ) -> bool:
+        """파일 다운로드 및 (ZIP일 경우) 자동 압축 해제"""
+        try:
+            # 1. 파일 다운로드
+            async with self.sem:
+                async with client.stream(
+                    "GET", url, follow_redirects=True, timeout=120.0
+                ) as resp:
+                    resp.raise_for_status()
+                    async with aiofiles.open(dest_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes():
+                            await f.write(chunk)
 
-        # 저장 디렉토리 생성
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            # 2. [추가] ZIP 파일 자동 압축 해제 로직
+            if dest_path.lower().endswith(".zip"):
+                await self._extract_zip(dest_path)
 
-        # 비동기 파일 쓰기
-        async with aiofiles.open(save_path, mode="wb") as f:
-            await f.write(await response.read())
+            return True
+        except Exception as e:
+            logger.warning(f"Download/Extract failed: {url} -> {e}")
+            return False
 
-    # [무결성 검증] 파일이 존재하지 않거나 크기가 0이면 예외 발생 (재시도 유도)
-    if not os.path.exists(save_path) or os.path.getsize(save_path) == 0:
-        if os.path.exists(save_path):
-            os.remove(save_path)
-        raise ValueError(f"Integrity check failed: {save_path} is empty")
+    async def _extract_zip(self, zip_path: str):
+        """ZIP 파일을 동일한 폴더에 해제하고 원본은 (선택적으로) 삭제"""
+        try:
+            # 비동기 실행을 위해 run_in_executor 사용 (파일 I/O 블로킹 방지)
+            loop = asyncio.get_event_loop()
+            extract_dir = os.path.dirname(zip_path)
 
+            def extract():
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(extract_dir)
 
-async def download_file(
-    session: aiohttp.ClientSession,
-    url: str,
-    save_path: str,
-    semaphore: asyncio.Semaphore,
-) -> bool:
-    """동시성 제어 및 에러 로깅을 포함한 다운로드 래퍼 함수."""
-    if not url or not isinstance(url, str) or url.lower() == "none":
-        return False
+            await loop.run_in_executor(None, extract)
+            logger.info(f"Extracted: {os.path.basename(zip_path)}")
 
-    # 이미 파일이 존재하고 내용이 있다면 스킵
-    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+            # (선택) 압축 해제 후 zip 파일 삭제하려면 아래 주석 해제
+            # os.remove(zip_path)
+
+        except zipfile.BadZipFile:
+            logger.error(f"Invalid zip file: {zip_path}")
+
+    # ... (이하 get_pending_tasks, update_task_status 등 기존 메서드 동일) ...
+    def get_pending_tasks(self, limit: int = 100) -> List[Tuple]:
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, test_no, file_type, url, filename 
+                FROM download_queue 
+                WHERE status = 'PENDING' 
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def update_task_status(self, task_id: int, status: str):
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE download_queue SET status = ? WHERE id = ?", (status, task_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def process_batch(self):
+        tasks_data = self.get_pending_tasks(
+            limit=10
+        )  # 압축 해제 부하 고려하여 배치 크기 조절 권장 (50 -> 10)
+
+        if not tasks_data:
+            return False
+
+        async with httpx.AsyncClient(headers=self.headers) as client:
+            download_tasks = []
+
+            for task in tasks_data:
+                task_id, test_no, ftype, url, fname = task
+
+                # 저장 경로: data/downloads/{test_no}/v06940.zip
+                save_dir = os.path.join(self.base_dir, str(test_no))
+                os.makedirs(save_dir, exist_ok=True)
+                dest_path = os.path.join(save_dir, fname)
+
+                download_tasks.append(
+                    self.execute_download(client, task_id, url, dest_path)
+                )
+
+            # tqdm 설정
+            for f in tqdm(
+                asyncio.as_completed(download_tasks),
+                total=len(download_tasks),
+                desc="Processing Files",
+                unit="file",
+            ):
+                await f
+
         return True
 
-    try:
-        async with semaphore:
-            await _download_core(session, url, save_path)
+    async def execute_download(self, client, task_id, url, dest_path):
+        # 파일이 이미 존재하면 스킵 (압축 해제된 파일 체크는 복잡하므로 zip 존재 여부만 체크)
+        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            self.update_task_status(task_id, "DONE")
             return True
-    except Exception as e:
-        # 재시도 끝에 최종 실패 시 로그 기록
-        logger.error(
-            f"DOWNLOAD_FAILED | URL: {url} | Path: {save_path} | Reason: {str(e)}"
-        )
-        return False
+
+        success = await self._download_file(client, url, dest_path)
+        status = "DONE" if success else "ERROR"
+        self.update_task_status(task_id, status)
+        return success
 
 
-async def process_test_record(
-    session: aiohttp.ClientSession,
-    record: Dict[str, Any],
-    download_reports: bool,
-    semaphore: asyncio.Semaphore,
-) -> Dict[str, int]:
-    """단일 테스트 레코드의 TDMS 및 PDF 링크를 처리."""
-    test_no = record.get("test_no")
-    year = record.get("model_year", "unknown_year")
-
-    # JSON 구조에서 links와 reports 추출
-    links = record.get("links")
-    if not isinstance(links, dict):
-        links = {}
-    reports = record.get("reports", [])
-
-    results = {"signals": 0, "reports": 0}
-
-    # 1. 신호 데이터 다운로드 (URL_TDMS 키 사용)
-    tdms_url = links.get("URL_TDMS")
-    if tdms_url:
-        filename = os.path.basename(tdms_url)
-        save_path = os.path.join(
-            BASE_DOWNLOAD_DIR, SIGNAL_DIR_NAME, str(year), str(test_no), filename
-        )
-        if await download_file(session, tdms_url, save_path, semaphore):
-            results["signals"] += 1
-
-    # 2. PDF 리포트 다운로드 (옵션 활성화 시)
-    if download_reports and reports:
-        for rep in reports:
-            pdf_url = rep.get("URL")
-            if pdf_url and pdf_url.lower().endswith(".pdf"):
-                filename = os.path.basename(pdf_url)
-                save_path = os.path.join(
-                    BASE_DOWNLOAD_DIR,
-                    REPORT_DIR_NAME,
-                    str(year),
-                    str(test_no),
-                    filename,
-                )
-                if await download_file(session, pdf_url, save_path, semaphore):
-                    results["reports"] += 1
-    return results
+def _get_db_connection():
+    return sqlite3.connect(settings.DB_PATH)
 
 
-def load_metadata_records() -> List[Dict[str, Any]]:
-    """nhtsa_data 폴더에서 모든 JSON 레코드를 로드."""
-    json_files = glob.glob(os.path.join(config.OUTPUT_DIR, "nhtsa_*.json"))
-    if not json_files:
-        print(f"[!] No metadata JSON files found in '{config.OUTPUT_DIR}'.")
-        return []
+async def main():
+    downloader = FileDownloader()
+    print("=== NHTSA File Downloader & Extractor Started ===")
 
-    all_records: List[Dict[str, Any]] = []
-    for jf in json_files:
-        with open(jf, "r", encoding="utf-8") as f:
-            try:
-                all_records.extend(json.load(f))
-            except json.JSONDecodeError:
-                print(f"[!] Warning: Could not decode JSON from {jf}.")
-    return all_records
+    while True:
+        has_work = await downloader.process_batch()
+        if not has_work:
+            print("Queue empty. Waiting...")
+            await asyncio.sleep(5)
+            continue
 
-
-async def main(args: argparse.Namespace) -> None:
-    """다운로드 프로세스 조율."""
-    all_records = load_metadata_records()
-    if not all_records:
-        return
-
-    print(f"[*] Found {len(all_records)} total test records.")
-    print("[*] Downloading Signals (Target: TDMS zip)...")
-    if args.download_reports:
-        print("[*] Downloading Reports (Target: PDF)...")
-
-    # 동시 다운로드 개수 제한 (서버 부하 및 차단 방지)
-    sem = asyncio.Semaphore(5)
-
-    total_signals = 0
-    total_reports = 0
-
-    async with aiohttp.ClientSession(headers=config.API_HEADERS) as session:
-        tasks: List[Coroutine[Any, Any, Dict[str, int]]] = [
-            process_test_record(session, rec, args.download_reports, sem)
-            for rec in all_records
-        ]
-
-        # tqdm 프로그레스 바 출력
-        for f in tqdm(
-            asyncio.as_completed(tasks), total=len(tasks), desc="Downloading", ncols=100
-        ):
-            res = await f
-            total_signals += res["signals"]
-            total_reports += res["reports"]
-
-    print("\n[Done] Download Finished.")
-    print(f"    - Successfully Downloaded TDMS Zips: {total_signals}")
-    print(f"    - Successfully Downloaded Report PDFs: {total_reports}")
-    print(f"    - Errors logged to: {ERROR_LOG_FILE}")
+        print("Batch processed.")
+        await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
-    # Windows 환경에서의 비동기 정책 설정 (Python 3.8+ 대응)
     if sys.platform == "win32":
-        try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        except AttributeError:
-            pass
-
-    parser = argparse.ArgumentParser(description="NHTSA File Downloader (TDMS & PDF)")
-    parser.add_argument(
-        "--download-reports",
-        action="store_true",
-        help="Download PDF reports in addition to TDMS signal files.",
-    )
-    cmd_args = parser.parse_args()
 
     try:
-        asyncio.run(main(cmd_args))
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[!] Download interrupted by user.")
+        print("\n[!] Stopped.")

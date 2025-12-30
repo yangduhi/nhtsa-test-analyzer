@@ -1,162 +1,92 @@
-"""
-API client for interacting with the NHTSA (National Highway Traffic Safety Administration) API.
-
-This module provides a client to fetch vehicle crash test data, handling
-pagination, concurrent requests, and data validation.
-"""
-
 import asyncio
-import math
-from typing import Any, Dict, List
-
 import httpx
-from src.core.models import NHTSATestMetadata
+from typing import Optional, List, Any
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
+from tqdm.asyncio import tqdm
+
+from config import settings
+
+# [수정] 변경된 모델 이름(NHTSARecord)으로 import 수정
+from src.core.models import NHTSARecord
+from src.core.parser import parse_record_to_model
 
 
 class NHTSAClient:
-    """A client for fetching data from the NHTSA vehicle safety API.
-
-    Handles API configuration, concurrent request management, and pagination
-    to efficiently download and parse crash test metadata.
-
-    Attributes:
-        base_url: The base URL for the NHTSA API.
-        headers: The HTTP headers to use for API requests.
-        timeout: The timeout in seconds for each request.
-        semaphore: An asyncio.Semaphore to limit concurrent requests.
+    """
+    통합 API 클라이언트.
+    비동기 세션 관리, 재시도 로직, 파싱 파이프라인을 캡슐화합니다.
     """
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        """Initializes the NHTSAClient.
+    def __init__(self):
+        self.base_url = settings.BASE_URL
+        self.headers = settings.API_HEADERS
+        # 동시성 제어를 위한 세마포어
+        self.sem = asyncio.Semaphore(settings.MAX_CONCURRENT_REQUESTS)
 
-        Args:
-            config: A dictionary containing 'api' and 'collection' settings.
-        """
-        api_config: Dict[str, Any] = config.get("api", {})
-        coll_config: Dict[str, Any] = config.get("collection", {})
-
-        raw_url: str = api_config.get(
-            "base_url", "https://nrd.api.nhtsa.dot.gov/nhtsa/vehicle/api/v1"
-        )
-        self.base_url: str = raw_url.rstrip("/")
-
-        self.headers: Dict[str, str] = api_config.get("headers", {})
-        self.timeout: int = coll_config.get("timeout_seconds", 60)
-        max_tasks: int = coll_config.get("max_concurrent_tasks", 5)
-        self.semaphore: asyncio.Semaphore = asyncio.Semaphore(max_tasks)
-
-    async def fetch_page(
-        self, client: httpx.AsyncClient, page_num: int
-    ) -> List[Dict[str, Any]]:
-        """Fetches a single page of test results from the API.
-
-        Args:
-            client: An httpx.AsyncClient instance.
-            page_num: The page number to fetch.
-
-        Returns:
-            A list of raw result dictionaries from the API page, or an
-            empty list if the request fails.
-        """
-        url = f"{self.base_url}/vehicle-database-test-results"
-        params = {"pageNumber": page_num}
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    async def _fetch_json(self, client: httpx.AsyncClient, url: str) -> Optional[dict]:
+        """내부 Fetch 메서드 (재시도 로직 적용)"""
         try:
-            response = await client.get(url, params=params)
-            response.raise_for_status()  # Raise an exception for bad status codes
-            data = response.json()
-            return data.get("results", [])
-        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
-            print(f"  [!] Error fetching page {page_num}: {e}")
-            return []
+            resp = await client.get(url, timeout=settings.TIMEOUT_SECONDS)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP Error {e.response.status_code} for {url}")
+            raise
+        except Exception as e:
+            logger.error(f"Network error for {url}: {e}")
+            raise
 
-    async def fetch_all_data(self) -> List[NHTSATestMetadata]:
-        """Fetches all data records from the API in parallel.
+    # [수정] 리턴 타입 힌트 변경 (NHTSATestMetadata -> NHTSARecord)
+    async def fetch_and_parse_test(
+        self, client: httpx.AsyncClient, test_id: int
+    ) -> Optional[NHTSARecord]:
+        """단일 테스트 ID 조회 및 Pydantic 모델 파싱"""
+        url = f"{self.base_url}/vehicle-database-test-results/metadata/{test_id}"
 
-        This method first determines the total number of pages and then
-        creates concurrent tasks to fetch all pages, respecting the semaphore
-        limit. It then parses the raw results into Pydantic models.
+        async with self.sem:  # 동시 요청 제한
+            raw_data = await self._fetch_json(client, url)
 
-        Returns:
-            A list of NHTSATestMetadata objects containing the validated
-            test data.
-        """
-        url = f"{self.base_url}/vehicle-database-test-results"
+            if not raw_data:
+                return None
 
-        async with httpx.AsyncClient(
-            headers=self.headers, timeout=self.timeout
-        ) as client:
-            print("  [Init] Checking total records...")
-            try:
-                resp = await client.get(url, params={"pageNumber": 0})
-                resp.raise_for_status()
-                data = resp.json()
+            # [수정] Parser 결과를 변수에 먼저 담습니다.
+            parsed_data = parse_record_to_model(test_id, raw_data)
 
-                meta = data.get("meta", {})
-                pagination = meta.get("pagination", {})
-                total_count = pagination.get("total", 0)
-                page_size = pagination.get("count", 20)
+            # [추가] 유효한 데이터가 있을 때만 '성공(Success)' 로그를 띄웁니다.
+            # 이 로그가 떠야 "아, 진짜로 수집되고 있구나" 하고 안심하실 수 있습니다.
+            if parsed_data:
+                logger.success(f"Found Data: Test ID {test_id}")
 
-                if total_count == 0:
-                    print(f"  [!] Total count is 0. Meta dump: {meta}")
-                    return []
+            return parsed_data
 
-                total_pages = math.ceil(total_count / page_size)
-                print(
-                    f"  [Init] Found {total_count} records ({total_pages} pages). "
-                    "Starting parallel fetch..."
-                )
+    # [수정] 리턴 타입 힌트 변경
+    async def fetch_batch(self, target_ids: List[int]) -> List[NHTSARecord]:
+        """다수의 ID를 병렬로 수집 (tqdm 프로그레스 바 적용)"""
+        results = []
 
-            except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
-                print(f"  [!] Initialization failed: {e}")
-                return []
+        # HTTP 연결 풀 제한 해제 (동시성 성능 확보)
+        limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
 
-            async def protected_fetch(p_num: int) -> List[Dict[str, Any]]:
-                """A wrapper to fetch a page within the semaphore context."""
-                async with self.semaphore:
-                    if p_num % 50 == 0:
-                        print(f"  ... fetching page {p_num}/{total_pages}")
-                    return await self.fetch_page(client, p_num)
+        async with httpx.AsyncClient(headers=self.headers, limits=limits) as client:
+            tasks = [self.fetch_and_parse_test(client, tid) for tid in target_ids]
 
-            tasks = [protected_fetch(i) for i in range(total_pages)]
-            pages_data = await asyncio.gather(*tasks)
+            # tqdm으로 진행 상황 시각화
+            for f in tqdm(
+                asyncio.as_completed(tasks),
+                total=len(tasks),
+                desc="Fetching Records",
+                unit="rec",
+                ncols=100,
+            ):
+                res = await f
+                if res:
+                    results.append(res)
 
-            all_raw_results: List[Dict[str, Any]] = []
-            for page in pages_data:
-                all_raw_results.extend(page)
-
-            print(f"  [Done] Downloaded {len(all_raw_results)} raw records.")
-            return self._parse_results(all_raw_results)
-
-    def _parse_results(
-        self, raw_results: List[Dict[str, Any]]
-    ) -> List[NHTSATestMetadata]:
-        """Parses raw API results into a list of Pydantic models.
-
-        Args:
-            raw_results: A list of dictionaries from the API.
-
-        Returns:
-            A list of validated NHTSATestMetadata objects.
-        """
-        valid_models: List[NHTSATestMetadata] = []
-        error_count = 0
-        print("  [Parsing] Converting to data models...")
-        for i, item in enumerate(raw_results):
-            try:
-                valid_models.append(NHTSATestMetadata(**item))
-            except Exception as e:
-                error_count += 1
-                if error_count <= 3:
-                    print(f"    [!] Validation Error (Item {i}): {e}")
-                    print(f"        Data sample: {str(item)[:100]}...")
-                continue
-
-        if error_count > 3:
-            print(f"    ... and {error_count - 3} more validation errors.")
-
-        if valid_models:
-            print(f"  [Success] Successfully parsed {len(valid_models)} items.")
-        else:
-            print(f"  [Fail] All {len(raw_results)} items failed validation.")
-
-        return valid_models
+        logger.info(f"Batch fetch complete. Valid records: {len(results)}")
+        return results
