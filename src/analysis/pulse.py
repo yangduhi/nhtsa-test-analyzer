@@ -1,7 +1,11 @@
 """
 Pulse Analysis & Data Loading Module.
-Updated: Adds fallback logic to parse ISO-MME style channel names (e.g., 10VEHCCG0000AC1P)
-when explicit metadata is missing.
+FINAL CORRECTED VERSION: Allows 'DOOR' channels if they are 'SILL'.
+
+[Correction based on Evidence]
+- Validated via sensor_survey_report.csv:
+  Channel '10DOORLERE...' corresponds to Description 'LEFT REAR SILL AX'.
+- Action: Removed 'DOOR' from blacklist. Added logic to treat 'DOOR' names as Sills.
 """
 
 import numpy as np
@@ -19,141 +23,237 @@ class CrashPulseAnalyzer:
         except Exception as e:
             logger.error(f"Failed to read TDMS file: {tdms_path} -> {e}")
 
+    def find_channel_by_name(self, channel_name: str) -> Optional[Any]:
+        """Finds a TDMS channel by its exact name."""
+        if not self.tdms_file:
+            return None
+        for group in self.tdms_file.groups():
+            if channel_name in group:
+                return group[channel_name]
+        logger.warning(f"Channel '{channel_name}' not found in any group.")
+        return None
+
     def find_vehicle_accel_channel(self) -> Optional[Any]:
         """
-        차체 거동 분석에 적합한 X축 가속도 센서를 찾습니다.
-        1단계: 메타데이터(SENLOCD, AXISD) 확인
-        2단계: 메타데이터가 없으면 채널 이름(ISO 코드) 파싱
+        NHTSA 관행 반영: 이름이 'DOOR'여도 설명이 'SILL'이면 차체 프레임 센서로 인정.
+        우선순위: Rear Seat Crossmember > Rear Sill > B-Pillar > Side Sill
         """
         if not self.tdms_file:
             return None
-
-        # [우선순위 1] 리어 실 / 플로어 (가장 노이즈 적음)
-        # [우선순위 2] 무게중심 (CG)
-        # [우선순위 3] B필러
 
         candidates = []
 
         for group in self.tdms_file.groups():
             for channel in group.channels():
-                # 1. 메타데이터 읽기
                 props = channel.properties
-                sen_type = str(props.get("SENTYPD", "")).upper()
-                sen_loc = str(props.get("SENLOCD", "")).upper()
-                axis = str(props.get("AXISD", "")).upper()
+                name = channel.name.upper().strip()
 
-                # 채널 이름 분석 (메타데이터 없을 때 대비)
-                name = channel.name.upper()
+                # 메타데이터 추출
+                def get_val(keys):
+                    for k in keys:
+                        for pk in props.keys():
+                            if k.upper() in pk.upper():
+                                return str(props[pk]).upper()
+                    return ""
 
-                # --- 판별 로직 ---
-                is_x_accel = False
-                location_score = 0  # 높을수록 우선순위 높음
-                found_loc = "Unknown"
+                ins_com = get_val(["INST_INSCOM", "COMMENT", "DESCRIPTION"])
+                ins_axis = get_val(["INST_AXIS", "AXIS", "D1AXIS"])
+                sen_type = get_val(["INST_SENTYP", "SENTYP", "TYPE"])
 
-                # Case A: 메타데이터가 살아있는 경우
-                if "ACCEL" in sen_type and ("X" in axis or "LONG" in axis):
-                    is_x_accel = True
-                    # 위치 점수 매기기
-                    if "REAR" in sen_loc and ("SILL" in sen_loc or "FLOOR" in sen_loc):
-                        location_score = 3
-                        found_loc = sen_loc
-                    elif "CG" in sen_loc:
-                        location_score = 2
-                        found_loc = sen_loc
-                    elif "PILLAR" in sen_loc:
-                        location_score = 1
-                        found_loc = sen_loc
+                full_desc = f"{ins_com} {name}"
 
-                # Case B: 메타데이터가 죽어있고('N/A'), 이름으로 판별해야 하는 경우
-                # 이름 패턴 예: 10VEHCCG0000AC1P (10:차량, VEHCCG:위치, AC:가속도, 1:X축)
-                elif "AC1" in name or "ACX" in name:  # AC1 = X축 가속도
-                    is_x_accel = True
+                # --- 1. 블랙리스트 (Blacklist) ---
+                # [수정됨] 'DOOR' 삭제함 (DOOR 이름이 SILL인 경우가 많음)
+                blacklist = [
+                    "ENGINE",
+                    "ENGN",  # 엔진
+                    "MDB",
+                    "BARRIER",
+                    "SLED",  # 대차
+                    "DUMMY",
+                    "HEAD",
+                    "CHEST",
+                    "CHST",
+                    "NECK",
+                    "FEMUR",
+                    "TIBIA",
+                    "PELVIS",
+                    "PELV",
+                    "FOOT",
+                    "SPINE",
+                    "SPIN",  # 더미
+                    "SEAT TRACK",
+                    "SEAT CUSHION",  # 시트 레일/쿠션 (프레임 아님)
+                    "STEER",
+                    "WHEEL",
+                    "WHEL",
+                    "BRAKE",
+                    "TIRE",
+                    "SUSP",  # 섀시
+                    "DASH",
+                    "INSTRUMENT",  # 대시보드
+                    "BUMP",
+                    "BUMPER",  # 범퍼
+                    "BAT",
+                    "BATT",  # 배터리
+                ]
 
-                    # 위치 코드 해석
-                    if (
-                        "LERE" in name or "RIRE" in name
-                    ):  # LEft REar / RIght REar (Sill/Floor 추정)
-                        location_score = 3
-                        found_loc = "Rear Sill/Floor (From Name)"
-                    elif "CG" in name:  # VEHCCG
-                        location_score = 2
-                        found_loc = "Vehicle CG (From Name)"
-                    elif "PILLAR" in name or "PIL" in name:
-                        location_score = 1
-                        found_loc = "B-Pillar (From Name)"
+                if any(bad in full_desc for bad in blacklist):
+                    continue
 
-                # 후보 등록
-                if is_x_accel and location_score > 0:
+                # 상대차량(20) 제외
+                if name.startswith("20") or name.startswith("MDB"):
+                    continue
+
+                # --- 2. 가속도계 + X축 확인 ---
+                is_accel = ("AC" in sen_type) or ("ACCEL" in sen_type) or ("AC" in name)
+
+                is_x_axis = False
+                if "XG" in ins_axis or "LONG" in ins_axis or ins_axis == "X":
+                    is_x_axis = True
+                elif "AC1" in name or "ACX" in name or "1P" in name or "_X" in name:
+                    is_x_axis = True
+                elif name.startswith("11") and "AC" in name:
+                    is_x_axis = True
+
+                if not (is_accel and is_x_axis):
+                    continue
+
+                # --- 3. [Target Selection] 화이트리스트 로직 ---
+                score = 0
+                loc_name = "Unknown"
+
+                # 키워드 확인
+                # NHTSA 데이터에서 'DOOR' 이름은 'SILL' 위치를 의미하는 경우가 대다수
+                is_sill = any(k in full_desc for k in ["SILL", "ROCKER", "DOOR"])
+                is_xmem = any(k in full_desc for k in ["CROSSMEMBER", "XMEM"])
+                is_pillar = any(k in full_desc for k in ["PILLAR", "POST", "BPLL"])
+
+                # 위치 확인 (Rear 우선)
+                is_rear = ("REAR" in full_desc) or ("LERE" in name) or ("RIRE" in name)
+
+                # [Rank 1] Rear Seat Crossmember (가장 견고)
+                if is_xmem and is_rear:
+                    score = 100
+                    loc_name = f"Rear Seat Crossmember ({name})"
+
+                # [Rank 2] Rear Sill (DOOR 이름 포함)
+                elif is_sill and is_rear:
+                    score = 95
+                    loc_name = f"Rear Sill ({name})"
+
+                # [Rank 3] Side Sill (Front/General)
+                elif is_sill:
+                    score = 80
+                    loc_name = f"Side Sill ({name})"
+
+                # [Rank 4] B-Pillar
+                elif is_pillar and (
+                    "B-" in full_desc or "BPLL" in name or "MID" in full_desc
+                ):
+                    score = 70
+                    loc_name = f"B-Pillar ({name})"
+
+                if score > 0:
                     candidates.append(
-                        {"channel": channel, "score": location_score, "loc": found_loc}
+                        {"channel": channel, "score": score, "loc": loc_name}
                     )
 
-        # 점수가 가장 높은 후보 선택
         if candidates:
-            # 점수(score) 내림차순 정렬
             candidates.sort(key=lambda x: x["score"], reverse=True)
-            best = candidates[0]
-            # logger.info(f"Selected Sensor: {best['loc']} ({best['channel'].name})")
-            return best["channel"]
+            return candidates[0]["channel"]
 
         return None
 
     def preprocess_signal(
         self, time_s: np.ndarray, raw_g: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        신호 전처리 (0점 조정, 극성 보정, T0 정렬)
-        """
-        # 1. 0점 조정 (Bias Removal)
-        # 데이터가 충분하면 앞부분 50개 샘플 사용 (노이즈 안정화 고려)
-        n_samples = min(len(raw_g), 50)
-        bias = np.mean(raw_g[:n_samples])
-        zeroed_g = raw_g - bias
-
-        # 2. 극성 보정 (Polarity Check)
-        # 정면 충돌(감속)은 물리적으로 속도가 줄어들어야 함.
-        # 절대값 최대 피크가 양수(+)라면 센서가 반대로 달린 것이므로 반전.
-        # (단, Rebound로 인한 양수 피크가 더 클 수도 있으나, 초기 100ms 내 피크를 보는 게 정확함)
-        # 여기서는 전체 피크 기준으로 단순화
-        max_idx = np.argmax(np.abs(zeroed_g))
-        if zeroed_g[max_idx] > 0:
-            zeroed_g = zeroed_g * -1
-
-        # 3. T0 정렬 (Time Zero Alignment)
-        # 0.5G 트리거
-        threshold_g = 0.5
-        trigger_indices = np.where(np.abs(zeroed_g) > threshold_g)[0]
-
-        if len(trigger_indices) > 0:
-            t0_idx = trigger_indices[0]
-            # 트리거 시점 이전 10ms 정도 여유를 두고 자르거나 이동하면 더 좋음 (Pre-trigger)
-            # 여기서는 0초로 딱 맞춤
-            t0_time = time_s[t0_idx]
-            shifted_time = time_s - t0_time
+        # Bias Removal
+        pre_impact_mask = time_s < 0
+        if np.any(pre_impact_mask):
+            offset = np.mean(raw_g[pre_impact_mask])
         else:
-            shifted_time = time_s
+            offset = np.mean(raw_g[:10])
+        zeroed_g = raw_g - offset
 
-        return shifted_time, zeroed_g
+        # Polarity Check (감속 = -G, 양수 피크면 반전)
+        check_idx = np.searchsorted(time_s, 0.15)
+        if check_idx > 5:
+            segment = zeroed_g[:check_idx]
+            peak_val = segment[np.argmax(np.abs(segment))]
+            if peak_val > 0:
+                zeroed_g = zeroed_g * -1
 
-    def get_clean_pulse_data(self) -> Dict:
-        """메인 실행 함수"""
-        channel = self.find_vehicle_accel_channel()
-        if not channel:
-            return {"error": "No suitable X-axis accelerometer found."}
+        return time_s, zeroed_g
 
+    def get_clean_pulse_data(self, channel_name: Optional[str] = None) -> Dict:
+        if channel_name:
+            channel = self.find_channel_by_name(channel_name)
+            if not channel:
+                return {"error": f"Channel '{channel_name}' not found."}
+        else:
+            channel = self.find_vehicle_accel_channel()
+            if not channel:
+                return {
+                    "error": "No suitable X-axis accelerometer found (Sill/Crossmember/Pillar)."
+                }
+
+        props = channel.properties
+
+        # Time Vector
         try:
-            raw_g = channel[:]
-            time_s = channel.time_track()
-        except Exception as e:
-            return {"error": f"Read Error: {e}"}
+            if "wf_increment" in props and "wf_start_offset" in props:
+                dt = float(props["wf_increment"])
+                t0 = float(props["wf_start_offset"])
+                time_s = t0 + np.arange(len(channel)) * dt
+                raw_g = channel[:]
+            else:
+                raw_g = channel[:]
+                time_s = channel.time_track()
+                dt = time_s[1] - time_s[0] if len(time_s) > 1 else 1e-4
+        except:
+            return {"error": "Time vector construction failed"}
 
+        # Velocity
+        impact_velocity_kph = None
+        speed_keys = ["INST_INIVEL", "TEST_CLSSPD", "VEH_VEHSPD", "CLOSING_SPEED"]
+        for key in speed_keys:
+            val = props.get(key)
+            if val is None and self.tdms_file:
+                val = self.tdms_file.properties.get(key)
+            if val:
+                try:
+                    f_val = float(val)
+                    if f_val > 1.0:
+                        impact_velocity_kph = f_val
+                        break
+                except:
+                    continue
+
+        # Angle
+        impact_angle = 0.0
+        angle_keys = ["TEST_IMPANG", "IMPANG", "IMPACT_ANGLE"]
+        for key in angle_keys:
+            val = props.get(key)
+            if val is None and self.tdms_file:
+                val = self.tdms_file.properties.get(key)
+            if val:
+                try:
+                    impact_angle = float(val)
+                    break
+                except:
+                    continue
+
+        # Preprocess
         clean_time, clean_g = self.preprocess_signal(time_s, raw_g)
 
         return {
             "time_s": clean_time,
             "accel_g": clean_g,
-            "fs": 1.0 / (time_s[1] - time_s[0]) if len(time_s) > 1 else 10000.0,
-            "meta": channel.properties,
+            "fs": 1.0 / dt,
+            "impact_velocity_kph": impact_velocity_kph,
+            "impact_angle_deg": impact_angle,
+            "meta": props,
             "sensor_name": channel.name,
-            "sensor_loc": channel.properties.get("SENLOCD", "Unknown"),
+            "sensor_loc": props.get("INST_INSCOM") or props.get("SENLOCD", "Unknown"),
         }

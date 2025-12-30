@@ -78,23 +78,50 @@ def save_results_to_db(results_list):
 
 
 def get_ready_tests():
+    """
+    [수정됨] matched_sensor_list.csv에서 TestNo와 ChannelName을 읽어 분석 대상을 결정합니다.
+    - CSV 파일 로드 및 정리
+    - DB에서 차량 무게(weight)와 TDMS 파일명(filename) 정보 가져오기
+    - CSV 데이터와 DB 데이터를 병합하여 최종 분석 목록 생성
+    """
+    # 1. CSV 파일 로드 및 전처리
+    csv_path = 'matched_sensor_list.csv'
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"'{csv_path}' 파일이 존재하지 않습니다.")
+
+    df_csv = pd.read_csv(csv_path, dtype={'TestNo': str})
+    df_csv.dropna(subset=['TestNo', 'ChannelName'], inplace=True)
+    df_csv.rename(columns={'TestNo': 'test_no', 'ChannelName': 'channel_name'}, inplace=True)
+    
+    # test_no를 정수로 변환 시도 (오류 발생 시 해당 행 제외)
+    df_csv['test_no'] = pd.to_numeric(df_csv['test_no'], errors='coerce')
+    df_csv.dropna(subset=['test_no'], inplace=True)
+    df_csv['test_no'] = df_csv['test_no'].astype(int)
+
+    test_numbers = df_csv['test_no'].unique().tolist()
+    if not test_numbers:
+        return pd.DataFrame()
+
+    # 2. DB에서 필요한 정보(weight, filename) 조회
     conn = sqlite3.connect(settings.DB_PATH)
-    # LIMIT 제거: 모든 데이터 조회
-    query = """
+    query = f"""
     SELECT 
-        t.test_no, t.year, t.make, t.model, v.weight, q.filename
+        t.test_no, v.weight, q.filename
     FROM crash_tests t
-    JOIN download_queue q ON t.test_no = q.test_no
     JOIN test_vehicles v ON t.test_no = v.test_no
-    WHERE t.crash_type = 'VEHICLE INTO BARRIER'
+    JOIN download_queue q ON t.test_no = q.test_no
+    WHERE t.test_no IN ({','.join('?' for _ in test_numbers)})
       AND q.file_type = 'TDMS' 
       AND q.status = 'DONE'
       AND v.weight IS NOT NULL
-    ORDER BY t.test_no DESC
     """
-    df = pd.read_sql_query(query, conn)
+    df_db = pd.read_sql_query(query, conn, params=test_numbers)
     conn.close()
-    return df
+
+    # 3. CSV 데이터와 DB 데이터를 'test_no' 기준으로 병합
+    df_merged = pd.merge(df_csv, df_db, on='test_no', how='inner')
+    
+    return df_merged
 
 
 def find_tdms_file(test_no, zip_filename):
@@ -112,11 +139,15 @@ def main():
     # 1. 결과 테이블 준비
     init_analysis_table()
 
-    print("[*] Loading all test cases from DB...")
-    df_tests = get_ready_tests()
+    print("[*] Loading test cases from 'matched_sensor_list.csv'...")
+    try:
+        df_tests = get_ready_tests()
+    except FileNotFoundError as e:
+        print(f"[Error] {e}")
+        return
 
     if df_tests.empty:
-        print("[!] No ready tests found.")
+        print("[!] No ready tests found based on the CSV and DB.")
         return
 
     print(f"[*] Found {len(df_tests)} tests. Starting Batch Analysis...")
@@ -134,16 +165,19 @@ def main():
     for _, row in tqdm(df_tests.iterrows(), total=len(df_tests)):
         test_no = row["test_no"]
         veh_weight = row["weight"]
+        channel_name = row["channel_name"]  # [수정됨] 사용할 채널 이름
 
-        tdms_path = find_tdms_file(test_no, row["filename"])
+        tdms_path = find_tdms_file(test_no, row.get("filename")) # filename이 없을 수 있음
         if not tdms_path:
             continue
 
         analyzer = CrashPulseAnalyzer(tdms_path)
-        clean_data = analyzer.get_clean_pulse_data()
+        # [수정됨] 지정된 채널 이름으로 데이터 요청
+        clean_data = analyzer.get_clean_pulse_data(channel_name=channel_name)
 
         if "error" in clean_data:
             # 에러 발생 시 건너뜀 (로그 생략하여 속도 향상)
+            print(f"Failed TestNo: {test_no}, Channel: {channel_name}, Error: {clean_data['error']}")
             continue
 
         try:
@@ -154,7 +188,8 @@ def main():
             )
             res["test_no"] = test_no
             results_buffer.append(res)
-        except Exception:
+        except Exception as e:
+            print(f"Analysis failed for TestNo: {test_no} with error: {e}")
             continue
 
         # 메모리 관리를 위해 50개마다 DB 저장
