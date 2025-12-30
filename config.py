@@ -13,7 +13,7 @@ from typing import Dict
 # 1. Project Settings
 # ---------------------------------------------------------
 PROJECT_NAME: str = "NHTSA_Frontal_Crash_Analysis"
-VERSION: str = "1.0.0"
+VERSION: str = "1.0.1"  # 버전 업그레이드
 
 # ---------------------------------------------------------
 # 2. Collection Settings (데이터 수집)
@@ -21,6 +21,9 @@ VERSION: str = "1.0.0"
 # YAML의 target_years: [2010, 2025]에 해당
 # 2010년 데이터의 시작점인 Test No 6931번
 MIN_TEST_NO: int = 6931
+
+# [추가] 수집할 최대 Test ID (main.py에서 이동됨)
+MAX_TEST_NO: int = 20000
 
 # [중요] 403 방지를 위해 YAML 설정대로 2로 낮춤 (기존 30 -> 2)
 MAX_CONCURRENT_REQUESTS: int = 2

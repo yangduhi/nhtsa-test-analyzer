@@ -67,7 +67,8 @@ def save_by_year(records: List[Dict[str, Any]]) -> None:
         if year:
             try:
                 year_int = int(year)
-                if 2009 < year_int < 2030:
+                # [안정성] 연도 범위 검증 (오타나 이상치 방지)
+                if 1970 < year_int < 2030:
                     if year_int not in grouped:
                         grouped[year_int] = []
                     grouped[year_int].append(record)
@@ -95,6 +96,8 @@ def _merge_and_save(filename: str, new_items: List[Dict[str, Any]]) -> None:
         new_items: A list of new records to merge into the file.
     """
     existing_data: List[Dict[str, Any]] = []
+
+    # [최적화] 파일이 존재할 때만 읽기 시도
     if os.path.exists(filename):
         try:
             with open(filename, "r", encoding="utf-8") as f:
@@ -112,4 +115,6 @@ def _merge_and_save(filename: str, new_items: List[Dict[str, Any]]) -> None:
 
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(final_list, f, indent=4, ensure_ascii=False)
-    print(f"    - Saved/Updated {len(final_list)} records to {os.path.basename(filename)}")
+    print(
+        f"    - Saved/Updated {len(final_list)} records to {os.path.basename(filename)}"
+    )

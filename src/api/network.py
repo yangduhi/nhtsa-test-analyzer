@@ -35,8 +35,13 @@ async def _fetch_json(
         ) as response:
             if response.status == 200:
                 return await response.json()
+            elif response.status == 404:
+                # 404는 데이터가 없는 경우이므로 조용히 처리
+                return None
             else:
-                print(f"    - DEBUG_NETWORK: Failed to fetch {url}, status: {response.status}")
+                print(
+                    f"    - DEBUG_NETWORK: Failed to fetch {url}, status: {response.status}"
+                )
                 return None
     except asyncio.TimeoutError:
         print(f"    - DEBUG_NETWORK: Timeout fetching {url}")
@@ -66,30 +71,43 @@ async def _fetch_and_parse_id(
 
     async with sem:
         raw_data = await _fetch_json(session, url)
+
+        # 1. 데이터가 아예 없는 경우 (HTTP 404 or Error)
         if not raw_data:
-            if _problematic_id_count < _MAX_DEBUG_PROBLEM_IDS:
-                print(f"    - DEBUG_NETWORK: No raw data for test_id {test_id}")
-                _problematic_id_count += 1
             return None
-        
-        # Check if "results" wrapper exists and is not empty before proceeding
+
+        # 2. 결과 래퍼가 비어있는 경우
         results_wrapper = raw_data.get("results", [])
         if not results_wrapper:
+            # 결과 자체가 비어있으면 데이터가 없는 것으로 간주
+            return None
+
+        first_wrapper = results_wrapper[0]
+
+        # 3. 껍데기만 있는 경우 (Soft 404: TEST/VEHICLE 모두 None)
+        # 서버에서 200 OK를 주지만 실제 데이터는 없는 결번 처리
+        if first_wrapper.get("TEST") is None and first_wrapper.get("VEHICLE") is None:
+            return None
+
+        # 4. VEHICLE 정보가 없는 경우
+        vehicle_list = first_wrapper.get("VEHICLE", [])
+        if not vehicle_list:
+            # 유효한 테스트 번호 같으나 차량 정보가 없는 경우에만 제한적으로 로깅
             if _problematic_id_count < _MAX_DEBUG_PROBLEM_IDS:
-                print(f"    - DEBUG_NETWORK: 'results' wrapper is empty for test_id {test_id}. Raw Data: {raw_data}")
+                print(
+                    f"    - DEBUG_NETWORK: Valid Test ID {test_id} but no vehicle data."
+                )
                 _problematic_id_count += 1
             return None
 
-        # Check if "VEHICLE" list exists and is not empty inside the first result
-        first_wrapper = results_wrapper[0]
-        vehicle_list = first_wrapper.get("VEHICLE", [])
-        if not vehicle_list:
-            if _problematic_id_count < _MAX_DEBUG_PROBLEM_IDS:
-                print(f"    - DEBUG_NETWORK: 'VEHICLE' list is empty for test_id {test_id}. Raw Data (first_wrapper): {first_wrapper}")
-                _problematic_id_count += 1
+        # 5. 파서(parser.py)를 통한 변환 및 필터링
+        # 이 과정에서 links와 reports 정보가 포함됩니다.
+        parsed_record = parse_record(test_id, raw_data)
+
+        if not parsed_record:
             return None
-        
-        return parse_record(test_id, raw_data)
+
+        return parsed_record
 
 
 async def fetch_all_test_data(target_ids: List[int]) -> List[Dict[str, Any]]:
@@ -116,14 +134,15 @@ async def fetch_all_test_data(target_ids: List[int]) -> List[Dict[str, Any]]:
     sem = asyncio.Semaphore(config.MAX_CONCURRENT_REQUESTS)
 
     async with aiohttp.ClientSession() as session:
-        tasks = [
-            _fetch_and_parse_id(session, tid, sem)
-            for tid in target_ids
-        ]
+        tasks = [_fetch_and_parse_id(session, tid, sem) for tid in target_ids]
+
+        # tqdm 설정: 전체 진행 상황을 깔끔하게 보여줌
         for f in tqdm(
             asyncio.as_completed(tasks),
             total=len(tasks),
             desc="    - Processing Records",
+            ncols=100,  # 프로그레스 바 너비 고정
+            unit="rec",  # 단위 표시
         ):
             result = await f
             if result:

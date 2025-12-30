@@ -38,19 +38,16 @@ async def main() -> None:
 
     initialize_environment()
 
-    # Define the full range of IDs to consider
-    min_test_no: int = config.MIN_TEST_NO  # e.g., 6931
-    # This range is from the new main.py, not config.py
-    max_test_no: int = 20000
+    # [수정] config에서 범위 가져오기 (하드코딩 제거)
+    min_test_no: int = config.MIN_TEST_NO
+    max_test_no: int = config.MAX_TEST_NO
 
     # Get IDs of records already collected locally
     existing_ids = get_existing_ids(config.OUTPUT_DIR)
 
     # Determine which IDs still need to be fetched
     all_possible_ids = range(min_test_no, max_test_no + 1)
-    target_ids: List[int] = [
-        tid for tid in all_possible_ids if tid not in existing_ids
-    ]
+    target_ids: List[int] = [tid for tid in all_possible_ids if tid not in existing_ids]
 
     skipped_count = len(all_possible_ids) - len(target_ids)
 
@@ -67,7 +64,9 @@ async def main() -> None:
     records = await fetch_all_test_data(target_ids)
 
     if not records:
-        print("\n[!] No new records were found or processed. Check API connection or ID range.")
+        print(
+            "\n[!] No new records were found or processed. Check API connection or ID range."
+        )
         return
 
     # 2. Save the collected records to files, merging with existing data
