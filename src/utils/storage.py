@@ -1,334 +1,349 @@
+# -*- coding: utf-8 -*-
 """
-Database handler for storing NHTSA test data using SQLite.
-FINAL VERSION: Normalized schema for Tests, Vehicles (Specs/Crash), and Occupants (Injury).
-Includes smart file naming for PDFs: v{TestID}_{Year}_{Make}_{Model}.pdf
+SQLite 데이터베이스와의 모든 상호작용을 관리하는 모듈.
+
+이 모듈은 데이터베이스 연결, 테이블 생성, 데이터 저장 및 조회 등
+데이터베이스 관련 모든 로직을 캡슐화한 `DatabaseHandler` 클래스를 제공합니다.
+
+Classes:
+    DatabaseHandler: SQLite DB 작업을 추상화한 핸들러 클래스.
+
+DataClasses:
+    DownloadTask: `download_queue` 테이블의 단일 행을 나타내는 데이터 클래스.
 """
 
 import sqlite3
 import json
-import re  # [추가] 파일명 정제용
-from typing import List, Set
+import re
+from typing import List, Set, Any
+from dataclasses import dataclass
 from loguru import logger
-import config
+
+from config import settings
 from src.core.models import NHTSARecord
+
+
+@dataclass
+class DownloadTask:
+    """`download_queue` 테이블의 단일 작업을 나타내는 데이터 구조."""
+    id: int
+    test_no: int
+    file_type: str
+    url: str
+    filename: str
+    status: str
 
 
 class DatabaseHandler:
     """
-    SQLite 저장소 관리자.
-    OLAP(분석)과 OLTP(수집) 패턴을 혼용한 하이브리드 스키마 사용.
+    SQLite 데이터베이스 작업을 관리하고 추상화하는 클래스.
+
+    이 클래스는 테이블 스키마 초기화, 데이터 배치 저장, 중복 데이터 확인,
+    다운로드 큐 관리 등 모든 DB 관련 기능을 포함합니다.
+
+    Attributes:
+        db_path (str): SQLite 데이터베이스 파일의 경로.
     """
 
-    def __init__(self, db_path: str = config.settings.DB_PATH):
+    def __init__(self, db_path: str = settings.DB_PATH):
+        """
+        DatabaseHandler를 초기화하고 데이터베이스 스키마를 설정합니다.
+
+        Args:
+            db_path (str): 연결할 데이터베이스 파일의 경로.
+        """
         self.db_path = db_path
-        self._init_db()
+        self._initialize_schema()
 
-    def _init_db(self):
+    def _get_connection(self) -> sqlite3.Connection:
         """
-        테이블 스키마 초기화 (3-Tier Structure + Download Queue)
+        SQLite 데이터베이스에 대한 새 연결을 생성하고 반환합니다.
+
+        Returns:
+            sqlite3.Connection: 데이터베이스 연결 객체.
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        return sqlite3.connect(self.db_path)
 
-        # 1. Main Metadata Table (테스트 기본 정보)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS crash_tests (
-                test_no INTEGER PRIMARY KEY,
-                test_date TEXT,
-                make TEXT,
-                model TEXT,
-                year INTEGER,
-                body_type TEXT,
-                crash_type TEXT,        -- 정면/측면 등 분류용
-                closing_speed REAL,
-                raw_json TEXT,          -- NoSQL처럼 전체 데이터 백업
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    def _initialize_schema(self) -> None:
+        """
+        데이터베이스에 필요한 모든 테이블과 인덱스를 생성합니다.
+        테이블이 이미 존재할 경우, 아무 작업도 수행하지 않습니다.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
 
-        # 2. Vehicle Details Table (차량 제원 및 파손 정보 - 1:N)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS test_vehicles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_no INTEGER,
-                vehicle_id INTEGER,
-                make TEXT,
-                model TEXT,
-                year INTEGER,
-                vin TEXT,
-                weight REAL,    -- 시험 중량
-                wheelbase REAL, -- 휠베이스
-                length REAL,    -- 전장
-                width REAL,     -- 전폭
-                vdi TEXT,       -- 파손 지수
-                pdof REAL,      -- 충돌 방향
-                dpd_1 REAL, dpd_2 REAL, dpd_3 REAL, 
-                dpd_4 REAL, dpd_5 REAL, dpd_6 REAL, -- 파손 깊이
-                measurements_pre TEXT,  -- JSON: 충돌 전 계측점
-                measurements_post TEXT, -- JSON: 충돌 후 계측점
-                FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
-            )
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS crash_tests (
+                    test_no INTEGER PRIMARY KEY,
+                    test_date TEXT,
+                    make TEXT,
+                    model TEXT,
+                    year INTEGER,
+                    body_type TEXT,
+                    crash_type TEXT,
+                    closing_speed REAL,
+                    raw_json TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # 3. Occupant Details Table (탑승자 및 상해 결과 - 1:N)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS test_occupants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_no INTEGER,
-                seat_pos TEXT,  -- 좌석 위치
-                type TEXT,      -- 더미 타입
-                age INTEGER,
-                sex TEXT,
-                hic REAL,              -- 두부 상해
-                chest_deflection REAL, -- 흉부 압박
-                femur_left REAL,       -- 좌측 대퇴부 하중
-                femur_right REAL,      -- 우측 대퇴부 하중
-                FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
-            )
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS test_vehicles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_no INTEGER,
+                    vehicle_id INTEGER,
+                    make TEXT,
+                    model TEXT,
+                    year INTEGER,
+                    vin TEXT,
+                    weight REAL,
+                    wheelbase REAL,
+                    length REAL,
+                    width REAL,
+                    vdi TEXT,
+                    pdof REAL,
+                    dpd_1 REAL, dpd_2 REAL, dpd_3 REAL, 
+                    dpd_4 REAL, dpd_5 REAL, dpd_6 REAL,
+                    measurements_pre TEXT,
+                    measurements_post TEXT,
+                    FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
+                )
+            """)
 
-        # 4. Download Queue Table (파일 다운로드 관리)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS download_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_no INTEGER,
-                file_type TEXT, -- 'TDMS', 'PDF', 'ZIP'
-                url TEXT,
-                status TEXT DEFAULT 'PENDING', -- 'PENDING', 'DONE', 'ERROR'
-                filename TEXT,
-                FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
-            )
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS test_occupants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_no INTEGER,
+                    seat_pos TEXT,
+                    type TEXT,
+                    age INTEGER,
+                    sex TEXT,
+                    hic REAL,
+                    chest_deflection REAL,
+                    femur_left REAL,
+                    femur_right REAL,
+                    FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
+                )
+            """)
 
-        # 인덱스 생성
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_make_year ON crash_tests(make, year)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_crash_type ON crash_tests(crash_type)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_veh_test ON test_vehicles(test_no)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_occ_test ON test_occupants(test_no)"
-        )
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON download_queue(url)"
-        )
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS download_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_no INTEGER,
+                    file_type TEXT,
+                    url TEXT,
+                    status TEXT DEFAULT 'PENDING',
+                    filename TEXT,
+                    FOREIGN KEY(test_no) REFERENCES crash_tests(test_no)
+                )
+            """)
 
-        conn.commit()
-        conn.close()
-
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_make_year ON crash_tests(make, year)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_crash_type ON crash_tests(crash_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_veh_test ON test_vehicles(test_no)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_occ_test ON test_occupants(test_no)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON download_queue(url)")
+            
+            conn.commit()
+            
     def get_existing_ids(self) -> Set[int]:
-        """이미 수집된 Test ID 목록 반환"""
+        """
+        데이터베이스에 이미 저장된 모든 테스트 ID를 조회하여 집합(Set)으로 반환합니다.
+
+        Returns:
+            Set[int]: 저장된 모든 고유 테스트 ID의 집합.
+        """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT test_no FROM crash_tests")
                 return {row[0] for row in cursor.fetchall()}
-        except Exception as e:
-            logger.error(f"Failed to fetch existing IDs: {e}")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to fetch existing IDs from database: {e}")
             return set()
 
-    def _sanitize_filename(self, s: str) -> str:
-        """파일명으로 사용할 수 없는 문자 제거 및 공백 처리"""
-        # 1. 문자열 변환 및 양쪽 공백 제거
-        s = str(s).strip()
-        # 2. 윈도우 파일명 금지 문자 제거 (\ / : * ? " < > |)
-        s = re.sub(r'[\\/*?:"<>|]', "", s)
-        # 3. 공백을 언더바(_)로 치환
-        s = s.replace(" ", "_")
-        return s
+    def _sanitize_filename(self, text: str) -> str:
+        """
+        문자열을 안전한 파일명으로 변환합니다.
+
+        Args:
+            text (str): 변환할 원본 문자열.
+
+        Returns:
+            str: 안전하게 변환된 파일명.
+        """
+        text = str(text).strip()
+        text = re.sub(r'[\\/*?"<>|]', "", text)  # 윈도우 파일명 금지 문자 제거
+        text = text.replace(" ", "_")  # 공백을 언더바(_)로 치환
+        return text
 
     def save_records(self, records: List[NHTSARecord]) -> None:
         """
-        Pydantic 모델 리스트를 받아 DB에 저장.
+        여러 NHTSARecord 객체를 데이터베이스 트랜잭션 내에 배치 저장합니다.
+
+        Args:
+            records (List[NHTSARecord]): 저장할 NHTSARecord 객체의 리스트.
         """
         if not records:
             return
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
+        with self._get_connection() as conn:
+            try:
+                cursor = conn.cursor()
 
-            test_batch = []
-            vehicle_batch = []
-            occupant_batch = []
-            download_batch = []
+                test_batch = []
+                vehicle_batch = []
+                occupant_batch = []
+                download_batch = []
 
-            for rec in records:
-                t = rec.test_info
+                for rec in records:
+                    t = rec.test_info
 
-                # 1. Main Table Data
-                main_veh = rec.vehicles[0] if rec.vehicles else None
-                main_make = main_veh.make if main_veh else "UNKNOWN"
-                main_model = main_veh.model if main_veh else "UNKNOWN"
-                main_year = (
-                    main_veh.year if (main_veh and main_veh.year is not None) else 0
-                )
-                main_body = main_veh.body_type if main_veh else None
-                crash_type = t.crash_config if t.crash_config else "UNKNOWN"
+                    # 1. Main Table Data for crash_tests
+                    main_veh = rec.vehicles[0] if rec.vehicles else None
+                    main_make = main_veh.make if main_veh else "UNKNOWN"
+                    main_model = main_veh.model if main_veh else "UNKNOWN"
+                    main_year = main_veh.year if (main_veh and main_veh.year is not None) else 0
+                    main_body = main_veh.body_type if main_veh else None
+                    crash_type = t.crash_config if t.crash_config else "UNKNOWN"
 
-                test_batch.append(
-                    (
-                        t.test_id,
-                        t.test_date,
-                        main_make,
-                        main_model,
-                        main_year,
-                        main_body,
-                        crash_type,
-                        t.closing_speed,
-                        rec.model_dump_json(by_alias=True),
-                    )
-                )
-
-                # 2. Vehicles Data
-                for v in rec.vehicles:
-                    v_year = v.year if v.year is not None else 0
-                    pre_json = (
-                        json.dumps(v.pre_impact_points) if v.pre_impact_points else None
-                    )
-                    post_json = (
-                        json.dumps(v.post_impact_points)
-                        if v.post_impact_points
-                        else None
-                    )
-
-                    vehicle_batch.append(
+                    test_batch.append(
                         (
                             t.test_id,
-                            v.vehicle_id,
-                            v.make,
-                            v.model,
-                            v_year,
-                            v.vin,
-                            v.weight,
-                            v.wheelbase,
-                            v.length,
-                            v.width,
-                            v.vdi,
-                            v.pdof,
-                            v.dpd1,
-                            v.dpd2,
-                            v.dpd3,
-                            v.dpd4,
-                            v.dpd5,
-                            v.dpd6,
-                            pre_json,
-                            post_json,
+                            t.test_date,
+                            main_make,
+                            main_model,
+                            main_year,
+                            main_body,
+                            crash_type,
+                            t.closing_speed,
+                            rec.model_dump_json(by_alias=True), # 원본 JSON 전체 저장
                         )
                     )
 
-                # 3. Occupants Data
-                for occ in rec.occupants:
-                    occupant_batch.append(
-                        (
-                            t.test_id,
-                            occ.seat_pos,
-                            occ.type,
-                            occ.age,
-                            occ.sex,
-                            occ.hic,
-                            occ.chest_deflection,
-                            occ.femur_left,
-                            occ.femur_right,
+                    # 2. Vehicle Details for test_vehicles
+                    for v in rec.vehicles:
+                        v_year = v.year if v.year is not None else 0
+                        pre_json = json.dumps(v.pre_impact_points) if v.pre_impact_points else None
+                        post_json = json.dumps(v.post_impact_points) if v.post_impact_points else None
+
+                        vehicle_batch.append(
+                            (
+                                t.test_id,
+                                v.vehicle_id,
+                                v.make,
+                                v.model,
+                                v_year,
+                                v.vin,
+                                v.weight,
+                                v.wheelbase,
+                                v.length,
+                                v.width,
+                                v.vdi,
+                                v.pdof,
+                                v.dpd1, v.dpd2, v.dpd3, v.dpd4, v.dpd5, v.dpd6,
+                                pre_json,
+                                post_json,
+                            )
                         )
-                    )
 
-                # 4. Download URLs 준비
+                    # 3. Occupant Details for test_occupants
+                    for occ in rec.occupants:
+                        occupant_batch.append(
+                            (
+                                t.test_id,
+                                occ.seat_pos,
+                                occ.type,
+                                occ.age,
+                                occ.sex,
+                                occ.hic,
+                                occ.chest_deflection,
+                                occ.femur_left,
+                                occ.femur_right,
+                            )
+                        )
 
-                # (1) TDMS 데이터 (v00000.zip)
-                if rec.urls and rec.urls.url_tdms:
-                    filename = f"v{t.test_id:05d}.zip"
-                    download_batch.append(
-                        (t.test_id, "TDMS", rec.urls.url_tdms, filename)
-                    )
+                    # 4. Prepare Download URLs for download_queue
 
-                # (2) PDF 리포트
-                if rec.reports:
-                    # 파일 크기 파싱 헬퍼
-                    def get_file_size(r):
-                        try:
-                            return int(r.filesize) if r.filesize else 0
-                        except ValueError:
-                            return 0
+                    # (1) TDMS data (often provided as v{test_id}.zip)
+                    if rec.urls and rec.urls.url_tdms:
+                        filename = f"v{t.test_id:05d}.zip"
+                        download_batch.append(
+                            (t.test_id, "TDMS", rec.urls.url_tdms, filename)
+                        )
 
-                    # 용량 기준 내림차순 정렬 (가장 큰 파일이 메인 리포트일 확률 높음)
-                    sorted_reports = sorted(
-                        rec.reports, key=get_file_size, reverse=True
-                    )
+                    # (2) PDF Reports
+                    if rec.reports:
+                        # Helper to parse file size for sorting
+                        def get_file_size(r: Any) -> int:
+                            try:
+                                return int(r.filesize) if r.filesize else 0
+                            except ValueError:
+                                return 0
 
-                    for idx, report in enumerate(sorted_reports):
-                        if not report.url:
-                            continue
+                        # Sort reports by size in descending order (largest first)
+                        sorted_reports = sorted(rec.reports, key=get_file_size, reverse=True)
 
-                        # [수정됨] 가장 큰 파일(첫 번째)은 요청하신 포맷으로 저장
-                        if idx == 0:
-                            # 안전한 파일명 생성 (공백 -> _, 특수문자 제거)
-                            safe_make = self._sanitize_filename(main_make)
-                            safe_model = self._sanitize_filename(main_model)
+                        for idx, report in enumerate(sorted_reports):
+                            if not report.url:
+                                continue
 
-                            # 포맷: v{TestID}_{Year}_{Make}_{Model}.pdf
-                            # 예: v10005_2017_CHEVROLET_VOLT.pdf
-                            filename = f"v{t.test_id:05d}_{main_year}_{safe_make}_{safe_model}.pdf"
-                        else:
-                            # 나머지 부가적인 파일은 원본 이름 유지
-                            filename = report.filename
+                            # For the largest (first) PDF, use the requested naming format
+                            if idx == 0:
+                                safe_make = self._sanitize_filename(main_make)
+                                safe_model = self._sanitize_filename(main_model)
+                                # Format: v{TestID}_{Year}_{Make}_{Model}.pdf (e.g., v10005_2017_CHEVROLET_VOLT.pdf)
+                                filename = f"v{t.test_id:05d}_{main_year}_{safe_make}_{safe_model}.pdf"
+                            else:
+                                # For other supplementary PDFs, keep the original filename
+                                filename = report.filename
 
-                        download_batch.append((t.test_id, "PDF", report.url, filename))
+                            download_batch.append((t.test_id, "PDF", report.url, filename))
 
-            # Batch Insert Execution
-            cursor.executemany(
-                """
-                INSERT OR REPLACE INTO crash_tests 
-                (test_no, test_date, make, model, year, body_type, crash_type, closing_speed, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                test_batch,
-            )
+                # Batch Insert Execution
+                cursor.executemany(
+                    """
+                    INSERT OR REPLACE INTO crash_tests 
+                    (test_no, test_date, make, model, year, body_type, crash_type, closing_speed, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    test_batch,
+                )
 
-            cursor.executemany(
-                """
-                INSERT INTO test_vehicles 
-                (test_no, vehicle_id, make, model, year, vin, 
-                 weight, wheelbase, length, width, 
-                 vdi, pdof, dpd_1, dpd_2, dpd_3, dpd_4, dpd_5, dpd_6, 
-                 measurements_pre, measurements_post)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                vehicle_batch,
-            )
+                cursor.executemany(
+                    """
+                    INSERT INTO test_vehicles 
+                    (test_no, vehicle_id, make, model, year, vin, 
+                     weight, wheelbase, length, width, 
+                     vdi, pdof, dpd_1, dpd_2, dpd_3, dpd_4, dpd_5, dpd_6, 
+                     measurements_pre, measurements_post)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    vehicle_batch,
+                )
 
-            cursor.executemany(
-                """
-                INSERT INTO test_occupants
-                (test_no, seat_pos, type, age, sex, hic, chest_deflection, femur_left, femur_right)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                occupant_batch,
-            )
+                cursor.executemany(
+                    """
+                    INSERT INTO test_occupants
+                    (test_no, seat_pos, type, age, sex, hic, chest_deflection, femur_left, femur_right)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    occupant_batch,
+                )
 
-            cursor.executemany(
-                """
-                INSERT OR IGNORE INTO download_queue (test_no, file_type, url, filename)
-                VALUES (?, ?, ?, ?)
-            """,
-                download_batch,
-            )
+                cursor.executemany(
+                    """
+                    INSERT OR IGNORE INTO download_queue (test_no, file_type, url, filename)
+                    VALUES (?, ?, ?, ?)
+                """,
+                    download_batch,
+                )
 
-            conn.commit()
-            logger.success(
-                f"Saved {len(records)} tests (Vehicles: {len(vehicle_batch)}, Occupants: {len(occupant_batch)})."
-            )
+                conn.commit()
+                logger.success(
+                    f"Saved {len(records)} tests (Vehicles: {len(vehicle_batch)}, Occupants: {len(occupant_batch)}, Downloads: {len(download_batch)})."
+                )
 
-        except Exception as e:
-            logger.error(f"DB Transaction Failed: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-    def _connect(self):
-        """외부 연결용 헬퍼"""
-        return sqlite3.connect(self.db_path)
+            except sqlite3.Error as e:
+                logger.error(f"DB Transaction Failed: {e}")
+                conn.rollback()

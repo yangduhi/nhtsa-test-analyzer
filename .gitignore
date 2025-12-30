@@ -7,6 +7,7 @@ env/
 # 수집된 데이터 폴더 제외 (용량이 크므로 Git에 올리지 않음)
 nhtsa_data/
 data/
+backup_data/
 
 # 파이썬 캐시 제외
 __pycache__/

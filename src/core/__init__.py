@@ -1,1 +1,7 @@
-"""Core components package for the NHTSA project, including data models."""
+# -*- coding: utf-8 -*-
+"""
+데이터 모델 및 파싱 로직을 포함하는 핵심 패키지.
+
+이 패키지는 Pydantic을 사용하여 API 응답 구조를 정의하는 데이터 모델과,
+원시 JSON 응답을 이 모델로 변환하는 파서를 제공합니다.
+"""

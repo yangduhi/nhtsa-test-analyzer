@@ -1,1 +1,7 @@
-"""API interaction package for the NHTSA project."""
+# -*- coding: utf-8 -*-
+"""
+API 통신 관련 모듈을 포함하는 패키지.
+
+이 패키지는 NHTSA API와의 모든 HTTP 상호작용을 캡슐화하는
+비동기 클라이언트를 제공합니다.
+"""
